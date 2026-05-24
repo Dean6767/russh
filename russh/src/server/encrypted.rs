@@ -173,7 +173,6 @@ impl Session {
                 debug!("request: {:?}", std::str::from_utf8(request));
                 if request == b"ssh-userauth" {
                     let auth_request = server_accept_service(
-                        self.common.config.as_ref().auth_banner,
                         self.common.config.as_ref().methods,
                         &mut enc.write,
                     );
@@ -188,6 +187,7 @@ impl Session {
                 enc.server_read_auth_request(
                     rejection_wait_until,
                     initial_none_rejection_wait_until,
+                    self.common.config.as_ref().auth_banner,
                     handler,
                     buf,
                     &mut self.common.auth_user,
@@ -232,7 +232,6 @@ impl Session {
 }
 
 fn server_accept_service(
-    banner: Option<&str>,
     methods: MethodSet,
     buffer: &mut CryptoVec,
 ) -> AuthRequest {
@@ -240,14 +239,6 @@ fn server_accept_service(
         buffer.push(msg::SERVICE_ACCEPT);
         buffer.extend_ssh_string(b"ssh-userauth");
     });
-
-    if let Some(banner) = banner {
-        push_packet!(buffer, {
-            buffer.push(msg::USERAUTH_BANNER);
-            buffer.extend_ssh_string(banner.as_bytes());
-            buffer.extend_ssh_string(b"");
-        })
-    }
 
     AuthRequest {
         methods,
@@ -263,6 +254,7 @@ impl Encrypted {
         &mut self,
         mut until: Instant,
         initial_auth_until: Instant,
+        auth_banner: Option<&str>,
         handler: &mut H,
         buf: &[u8],
         auth_user: &mut String,
@@ -279,6 +271,25 @@ impl Encrypted {
             std::str::from_utf8(service_name),
             std::str::from_utf8(method)
         );
+
+        // Envia o banner pré-auth no primeiro USERAUTH_REQUEST.
+        // OpenSSH só exibe banners que chegam APÓS o primeiro request — enviar
+        // junto com SERVICE_ACCEPT (como era antes) faz o cliente ignorar.
+        let is_first_auth_request =
+            if let EncryptedState::WaitingAuthRequest(ref a) = self.state {
+                a.rejection_count == 0
+            } else {
+                false
+            };
+        if is_first_auth_request {
+            if let Some(banner) = auth_banner {
+                push_packet!(self.write, {
+                    self.write.push(msg::USERAUTH_BANNER);
+                    self.write.extend_ssh_string(banner.as_bytes());
+                    self.write.extend_ssh_string(b"");
+                });
+            }
+        }
 
         if service_name == b"ssh-connection" {
             if method == b"password" {
